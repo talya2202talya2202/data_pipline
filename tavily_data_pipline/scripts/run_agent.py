@@ -21,10 +21,20 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
+# Ensure .env exists so user only has to add secrets (copy from .env.example if missing)
+env_file = project_root / ".env"
+env_example = project_root / ".env.example"
+if not env_file.exists() and env_example.exists():
+    import shutil
+    shutil.copy(env_example, env_file)
+    print("Created .env from .env.example.")
+    print("Add your secrets (at minimum TAVILY_API_KEY) to .env, then run this script again.")
+    sys.exit(0)
+
 # Load environment variables before importing components
 try:
     from dotenv import load_dotenv
-    load_dotenv(project_root / ".env")
+    load_dotenv(env_file)
 except ImportError:
     pass  # dotenv optional; use system env vars if not installed
 

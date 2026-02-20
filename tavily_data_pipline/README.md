@@ -1,65 +1,69 @@
 # Tavily Data Pipeline
 
-A data pipeline that runs a Tavily-based company research agent, collects execution metadata, and streams it through **MongoDB → AWS Kinesis Firehose → S3 → Snowflake Snowpipe**, with a Streamlit dashboard for visualization and analytics.
+A pipeline that runs a company-research agent (Tavily), collects execution metadata, and streams it to storage and analytics so we can answer clear **business questions** and present them in a dashboard.
 
-### Task requirements (mapping)
-
-| Requirement | How it is met |
-|-------------|----------------|
-| Stream data to S3 using Kinesis Firehose | Firehose client streams metadata to a delivery stream → S3; alternative (e.g. direct S3 or skip) documented. |
-| Data architecture / ERD | Three tables (`agent_runs`, `run_steps`, `api_calls`) and full ERD in [docs/data_model_erd.md](docs/data_model_erd.md); Mermaid ERD in this README. |
-| Snowpipe to ingest into Snowflake | `scripts/snowpipe_setup.sql`: tables, stage, and Snowpipes for auto-ingest from S3. |
-| Secure repo: .env or secrets manager | `.env` for local dev; `.env` in `.gitignore`; `.env.example` has placeholders only; [Secrets](#how-secrets-are-handled-securely) section in README. |
-| No credentials in GitHub | All secrets via env vars; `.env` never committed. |
-| README: architecture, setup/deploy, secrets | This README: architecture overview, [Setup and deployment](#setup-and-deployment-instructions), [How secrets are handled](#how-secrets-are-handled-securely). |
+**Purpose** — We want to know how the agent behaves in the wild: is it healthy, fast, used as expected, and cost-effective? The pipeline exists to turn raw runs into structured, queryable data (agent health, performance, usage, cost) and to support future questions—e.g. per-user behavior and cost attribution (see [Data architecture](#data-architecture-and-erd)).
 
 ---
 
-## Overview of Pipeline Architecture
+## Overview of pipeline
 
-Data flows from the agent through storage and into analytics as follows:
+Data flows as follows. Each component is described in one sentence below the diagram.
 
+```mermaid
+flowchart LR
+    subgraph agent [Agent Layer]
+        A[Toy Agent]
+        B[Metadata Collector]
+    end
+    
+    subgraph storage [Storage]
+        C[MongoDB]
+        D[S3]
+        E[Snowflake]
+    end
+    
+    subgraph pipeline [Pipeline]
+        F[Firehose]
+        G[Snowpipe]
+    end
+    
+    subgraph viz [Visualization]
+        H[Streamlit Dashboard]
+    end
+    
+    A --> B
+    B --> C
+    C --> F
+    F --> D
+    D --> G
+    G --> E
+    C --> H
+    E --> H
 ```
-┌─────────────────┐     ┌─────────────┐     ┌──────────────┐     ┌───────────┐     ┌───────────┐
-│  Toy AI Agent   │────▶│  Metadata   │────▶│   MongoDB    │────▶│ Firehose  │────▶│     S3    │
-│  (Tavily)       │     │  Collector  │     │   Atlas      │     │           │     │            │
-└─────────────────┘     └─────────────┘     └──────────────┘     └───────────┘     └─────┬─────┘
-                                                                                         │
-                                                                                         ▼
-┌─────────────────┐     ┌─────────────┐
-│   Streamlit     │◀────│  Snowflake  │◀──── Snowpipe (auto-ingest from S3)
-│   Dashboard     │     │  (3 tables) │
-└─────────────────┘     └─────────────┘
-```
 
-1. **Toy AI Agent** — Runs company research using the Tavily API (and optionally OpenAI for summarization).
-2. **Metadata Collector** — Captures run-level, step-level, and API-call-level metrics.
-3. **MongoDB** — Stores metadata documents; optional but useful for debugging and as a source for Firehose.
-4. **AWS Kinesis Firehose** — Streams metadata to S3 (buffer: size/time-based). 
-5. **Snowpipe** — Automatically ingests new JSON files from S3 into Snowflake tables.
-6. **Streamlit Dashboard** — Reads from Snowflake (or falls back to MongoDB) to visualize Agent Health, Performance, Usage, and Cost Efficiency.
+- **Toy Agent** — Runs company research via the Tavily API (and optionally OpenAI for summarization).
+- **Metadata Collector** — Captures run-, step-, and API-call-level metrics for persistence.
+- **MongoDB** — Stores metadata documents and can serve as a source for the dashboard and for Firehose.
+- **Firehose** — Streams metadata to S3 (buffer size/time configured in AWS).
+- **S3** — Landing zone for Firehose; Snowpipe reads from here.
+- **Snowpipe** — Automatically ingests new files from S3 into Snowflake tables.
+- **Snowflake** — Holds the normalized tables the dashboard queries.
+- **Streamlit Dashboard** — Reads from Snowflake (or falls back to MongoDB) and visualizes agent health, performance, usage, and cost.
 
-Detailed data flow and component interactions are in [docs/architecture.md](docs/architecture.md).
+More detail: [docs/architecture.md](docs/architecture.md).
 
 ---
 
-## Data Architecture and ERD
+## Data architecture and ERD
 
-The pipeline is built around **three normalized tables** in Snowflake so we can answer business questions clearly:
+The pipeline is built around **three normalized tables** so we can answer the business questions above and support drill-down.
 
-| Table        | Purpose |
-|-------------|---------|
-| **agent_runs** | One row per research run: company, industry, status, total latency, total API calls. |
-| **run_steps**  | One row per step in a run (e.g. search_overview, search_competitors, summarize): status and latency. |
-| **api_calls**  | One row per Tavily (or other) API call: query, results count, latency. |
-
-**agent_runs** is the parent; **run_steps** and **api_calls** link via `run_id`. This supports run-level KPIs, step-level debugging, and call-level cost/usage analysis.
-
-**ERD visualization:**
+**ERD:**
 
 ![Tavily Agent Pipeline — ERD](docs/erd_tavily_agent_pipeline.png)
 
-A full **Entity Relationship Diagram (ERD)** and column descriptions are in **[docs/data_model_erd.md](docs/data_model_erd.md)**. Mermaid version:
+Same model in Mermaid:
 
 ```mermaid
 erDiagram
@@ -91,186 +95,105 @@ erDiagram
     }
 ```
 
----
+**Purpose of each table**
 
-## Why This Shape? Business Questions We Answer
+| Table | Purpose |
+|-------|---------|
+| **agent_runs** | One row per run: company, industry, status, timings, total API calls. Used for run-level KPIs and dashboards. |
+| **run_steps** | One row per step in a run (e.g. search_overview, search_competitors, summarize). Used to see which step failed or is slow. |
+| **api_calls** | One row per external API call (e.g. Tavily). Used for cost and duplicate-query analysis. |
 
-The pipeline and 3-table design are built to support four areas of analysis:
+**Why this shape** — These tables directly support the four areas we care about: **Agent Health** (success/failure, errors), **Agent Performance** (latency, bottlenecks), **Usage & Demand** (runs over time, top companies), and **Cost Efficiency** (API calls per run, expensive or duplicate queries). The dashboard is built on these. In the future we may extend with more dimensions—for example **per-user** usage and **cost attribution** (e.g. by team or project)—using the same run/step/call backbone.
 
-1. **Agent Health** — Success vs failure rates, error breakdown, which companies or steps fail most.
-2. **Agent Performance** — Latency trends, slowest steps, bottlenecks (using `run_steps` and `agent_runs.total_latency_ms`).
-3. **Usage & Demand** — Runs over time, top companies researched, peak hours (from `agent_runs` and optional filters).
-4. **Cost Efficiency** — API calls per run, expensive or duplicate queries (from `api_calls` and `agent_runs.total_api_calls`).
-
-The dashboard sections map to these; the tables are structured so each question can be answered with simple aggregations and joins.
-
----
-
-## Toy Agent: What Changed (Design and Purpose)
-
-The toy agent is designed to be **predictable and observable**: explicit steps, clear schema, and metrics at run, step, and API-call level.
-
-### What changed
-
-- **Research is 3 explicit steps** (instead of one generic search):
-  - **search_overview** — Tavily: `"{company} company overview"`
-  - **search_competitors** — Tavily: `"{company} competitors market"`
-  - **summarize** — OpenAI (if configured): from the combined sources, extract `company_name` (normalized) and `industry` (single label, e.g. SaaS, Fintech) as JSON. If OpenAI is missing or fails, we use `company_name = raw query`, `industry = null`, and mark the step as skipped.
-
-- **Structured data for the pipeline** — Each run produces three logical “tables” for persistence and analytics:
-  - **agent_runs** — One row per run: `run_id`, `company_name`, `industry`, `status`, `started_at`, `completed_at`, `total_latency_ms`, `total_api_calls`, `error_message`.
-  - **run_steps** — One row per step: `step_id`, `run_id`, `step_name`, `status`, `latency_ms`, `error_message`.
-  - **api_calls** — One row per Tavily call: `call_id`, `run_id`, `query_used`, `results_returned`, `latency_ms`, `called_at`.
-
-- **MetadataCollector** was extended with per-step and per-API-call tracking so it can build an envelope (agent_run + run_steps + api_calls) for MongoDB/Firehose and for loading into the three Snowflake tables.
-
-### Purpose
-
-- Make the agent a **small, well-defined pipeline** with clear steps and a single outcome schema.
-- Produce data that **matches the target model** (agent_runs, run_steps, api_calls) for loading into Snowflake and building dashboards.
-- Support **observability**: run-level outcomes (company, industry, status, latency), step-level detail (which step failed, latency per step), and call-level detail (queries, result counts, latency).
-
-*Note: The current codebase includes a simplified single-search agent and a flat metadata collector; the dashboard and Snowflake client are built for the 3-table model. The full 3-step agent and envelope-shaped metadata can be implemented on top of the same run script and pipeline.*
+Full ERD and column list: [docs/data_model_erd.md](docs/data_model_erd.md).
 
 ---
 
-## Setup and Deployment Instructions
+## Design decisions
 
-### Prerequisites
+**Toy agent** — Research is split into **three explicit steps** instead of one generic search: (1) **search_overview** (Tavily: company overview), (2) **search_competitors** (Tavily: competitors/market), (3) **summarize** (OpenAI, if configured): from combined sources, extract normalized `company_name` and a single `industry` label (e.g. SaaS, Fintech). If OpenAI is missing or fails, we fall back to `company_name = raw query`, `industry = null`, and mark the step as skipped. This keeps the agent predictable and observable and produces a clear schema (run + steps + API calls) for the pipeline and dashboard.
 
-- Python 3.9+
-- (Optional) MongoDB Atlas account
-- (Optional) AWS account (for Firehose and S3)
-- (Optional) Snowflake account
+**Structured output** — Each run is designed to map to the three tables (`agent_runs`, `run_steps`, `api_calls`) so we can load once and answer health, performance, usage, and cost questions without ad-hoc parsing.
 
-### 1. Clone and enter the project
+---
+
+## Monitoring and logging
+
+*(You can expand here with how you run this in production—e.g. which platforms and how you centralize logs.)*
+
+In this repo, observability is implemented as follows. The **Metadata Collector** records run-level metrics (status, latency, API call count) and can be extended to record per-step and per-API-call detail. **run_agent.py** prints a short summary (research result, MongoDB id, Firehose sent/failed) and relies on these metadata structures for downstream storage (MongoDB, Firehose → S3) and analytics (Snowflake, dashboard). There is no centralized log aggregation in the codebase; logs are local stdout. For production you would typically ship these logs and metrics to your preferred monitoring and logging platform.
+
+---
+
+## Secrets and configuration
+
+All secrets (API keys, DB URIs, AWS and Snowflake credentials) are read from **environment variables**. Locally we use a **`.env`** file (via `python-dotenv`); `.env` is in `.gitignore` and is never committed. `.env.example` lists variable names with placeholders only. In production, credentials will be managed in a **secrets manager / vault** (e.g. HashiCorp Vault or cloud provider secrets) and injected as env vars at runtime.
+
+---
+
+## Repository structure
+
+The project is split into small, focused modules so responsibilities stay clear and the pipeline is easy to extend or test.
+
+| Area | Role |
+|------|------|
+| **src/agent** | Toy agent and metadata collector (research logic and metrics). |
+| **src/database** | MongoDB client (persist and query metadata). |
+| **src/pipeline** | Firehose client and metadata streamer (MongoDB → Firehose). |
+| **src/snowflake** | Snowflake client and queries for the three tables. |
+| **src/dashboard** | Streamlit app (health, performance, usage, cost). |
+| **scripts/** | Entrypoints: setup (venv, deps, .env), run_agent, Snowpipe DDL. |
+| **config/** | Runtime config (e.g. config.yaml). |
+| **docs/** | Architecture and data model (flow, ERD, columns). |
+
+---
+
+## Setup and how to run
+
+**Requirements** — Python 3.9+. For the full pipeline (agent → MongoDB → Firehose → S3 → Snowflake): Tavily API key, MongoDB URI, AWS credentials and Firehose stream, Snowflake credentials and Snowpipe (see [Environment variables](#environment-variables)).
+
+**One-time setup**
 
 ```bash
+git clone <repo-url>
 cd tavily_data_pipline
+./scripts/setup.sh
 ```
 
-### 2. Virtual environment and dependencies
+*(Windows: `scripts\setup.bat`.)* This creates a venv, installs dependencies, and copies `.env.example` to `.env` if missing.
+
+**Secrets** — Edit `.env` and set at least **TAVILY_API_KEY**. Add MongoDB, AWS, and Snowflake variables as needed for the full path.
+
+**Run the agent**
 
 ```bash
-python3 -m venv venv
 source venv/bin/activate   # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+python scripts/run_agent.py "Nvidia"
 ```
 
-### 3. Environment and secrets (required for agent)
+Use `--no-firehose` to skip Firehose; use `--verify-snowflake` to check that Snowflake has recent rows.
 
-Copy the example env file and fill in at least the Tavily key:
-
-```bash
-cp .env.example .env
-# Edit .env: set TAVILY_API_KEY (required). Others are optional.
-```
-
-Never commit `.env`; it is listed in `.gitignore`. See [How secrets are handled](#how-secrets-are-handled-securely) below.
-
-### 4. Run the agent
-
-```bash
-python3 scripts/run_agent.py "OpenAI"
-# Or: python3 scripts/run_agent.py "Tesla" --max-sources 5
-# Skip Firehose: python3 scripts/run_agent.py "Nvidia" --no-firehose
-```
-
-The script will run research, collect metadata, optionally save to MongoDB, and optionally stream to Firehose.
-
-### 5. Run the dashboard
+**Run the dashboard**
 
 ```bash
 streamlit run src/dashboard/app.py
 ```
 
-Open http://localhost:8501. The dashboard tries Snowflake first, then falls back to MongoDB.
+Open http://localhost:8501. The dashboard reads from Snowflake when configured, otherwise from MongoDB.
 
-### 6. Optional: MongoDB Atlas
+**Environment variables**
 
-1. Create an account at [mongodb.com/atlas](https://www.mongodb.com/atlas), create a free M0 cluster.
-2. Create a database user and allow network access.
-3. Get the connection string (Connect → Drivers).
-4. Set `MONGODB_URI` in `.env`.
-
-### 7. Optional: AWS Firehose and S3
-
-1. In AWS, create a Kinesis Firehose delivery stream with an S3 destination.
-2. Set in `.env`: `FIREHOSE_STREAM_NAME`, `S3_BUCKET_NAME`, `AWS_REGION`, and AWS credentials (see Environment Variables).
-3. If you have payment or setup constraints, you can omit Firehose and use only MongoDB (and optionally manual export to S3).
-
-### 8. Optional: Snowflake and Snowpipe
-
-1. Create a Snowflake account, database, and schema.
-2. Run the DDL and Snowpipe setup: edit placeholders in `scripts/snowpipe_setup.sql` (bucket, prefix, IAM role), then execute the script in Snowflake.
-3. Configure S3 event notifications so that when new files arrive, Snowpipe is triggered (see comments in `snowpipe_setup.sql`).
-4. Set Snowflake credentials in `.env` (see Environment Variables).
-
----
-
-## How Secrets Are Handled Securely
-
-- **No credentials in the repo** — All secrets (API keys, DB URIs, AWS keys, Snowflake password) are read from environment variables. The project uses a **`.env` file** (loaded via `python-dotenv`) for local development; `.env` is in **`.gitignore`** and is never committed.
-- **`.env.example`** — Contains only placeholder names (e.g. `your-tavily-api-key`). Copy to `.env` and fill in real values locally; do not commit `.env`.
-- **Production** — Prefer a **secrets manager** (e.g. AWS Secrets Manager, HashiCorp Vault) or CI/CD secrets; inject env vars at runtime and avoid storing secrets in code or in the repo.
-- **Rotation** — Rotate API keys and DB credentials periodically. In production, use IAM roles for AWS instead of long-lived access keys where possible.
-
----
-
-## Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| TAVILY_API_KEY | Yes | Tavily API key for the agent |
-| OPENAI_API_KEY | Optional | For summarize step (normalized company_name, industry) |
-| MONGODB_URI | For MongoDB | MongoDB connection string |
-| FIREHOSE_STREAM_NAME | For Firehose | Kinesis Firehose delivery stream name |
-| S3_BUCKET_NAME | For Firehose | S3 bucket for Firehose delivery |
-| AWS_ACCESS_KEY_ID | For Firehose | AWS access key |
-| AWS_SECRET_ACCESS_KEY | For Firehose | AWS secret key |
-| AWS_REGION | For Firehose | AWS region (e.g. us-east-1) |
-| SNOWFLAKE_ACCOUNT | For Snowflake | Snowflake account identifier |
-| SNOWFLAKE_USER | For Snowflake | Snowflake username |
-| SNOWFLAKE_PASSWORD | For Snowflake | Snowflake password |
-| SNOWFLAKE_WAREHOUSE | For Snowflake | Warehouse name |
-| SNOWFLAKE_DATABASE | For Snowflake | Database name |
-| SNOWFLAKE_SCHEMA | For Snowflake | Schema name |
-
----
-
-## Project Structure
-
-```
-tavily_data_pipline/
-├── src/
-│   ├── agent/           # Toy agent and metadata collector
-│   ├── database/        # MongoDB client
-│   ├── pipeline/        # Firehose client and metadata streamer
-│   ├── snowflake/       # Snowflake client (agent_runs, run_steps, api_calls)
-│   └── dashboard/       # Streamlit app
-├── scripts/
-│   ├── run_agent.py     # Main agent + pipeline script
-│   └── snowpipe_setup.sql  # Snowflake DDL and Snowpipe definitions
-├── config/              # config.yaml
-├── docs/
-│   ├── architecture.md # Data flow and components
-│   └── data_model_erd.md # Table architecture and ERD
-├── .env.example         # Template for secrets (no real values)
-└── README.md
-```
-
----
-
-## What Might Be Missing or Optional
-
-- **Firehose alternative** — If you cannot use Kinesis Firehose (e.g. billing or region limits), you can write metadata to S3 from your app or a small Lambda, or rely on MongoDB and periodic export. The rest of the pipeline (Snowpipe, dashboard) still applies once data lands in S3 or Snowflake.
-- **3-step agent implementation** — The README describes the *target* design (search_overview, search_competitors, summarize and the envelope with agent_runs/run_steps/api_calls). The repo may ship a simplified single-search agent; the Snowflake schema and dashboard are ready for the full 3-table payload when you add it.
-- **Snowpipe S3 paths** — `scripts/snowpipe_setup.sql` assumes separate prefixes (e.g. `runs/`, `steps/`, `calls/`) for each table. If your writer emits one envelope per run, you can use a single raw table and a task or view to split into the three tables, or adapt the writer to emit one object type per prefix.
-- **Idempotency** — For production, consider idempotent keys (e.g. `run_id`) and Snowpipe merge/upsert logic so duplicate S3 deliveries do not create duplicate rows.
+| Variable | Purpose |
+|----------|---------|
+| TAVILY_API_KEY | (Required) Tavily API key. |
+| OPENAI_API_KEY | Optional; for summarize step. |
+| MONGODB_URI | MongoDB connection string. |
+| FIREHOSE_STREAM_NAME, S3_BUCKET_NAME, AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY | Firehose → S3. |
+| SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD, SNOWFLAKE_WAREHOUSE, SNOWFLAKE_DATABASE, SNOWFLAKE_SCHEMA | Snowflake. |
 
 ---
 
 ## Documentation
 
-- [docs/architecture.md](docs/architecture.md) — Data flow, components, error handling.
-- [docs/data_model_erd.md](docs/data_model_erd.md) — Table architecture and ERD for agent_runs, run_steps, api_calls.
+- [docs/architecture.md](docs/architecture.md) — Data flow, components, error handling, deployment notes.
+- [docs/data_model_erd.md](docs/data_model_erd.md) — Full ERD and column reference for the three tables.
