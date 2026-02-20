@@ -1,0 +1,16 @@
+# Configuration file for the data pipeline
+
+agent:
+  version: "1.0.0"
+  default_max_sources: 5
+
+mongodb:
+  database: "agent_metadata_db"
+  collection: "agent_metadata"
+
+firehose:
+  buffer_size_mb: 5
+  buffer_interval_seconds: 60
+
+snowflake:
+  table_name: "agent_metadata"
