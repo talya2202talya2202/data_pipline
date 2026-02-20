@@ -67,12 +67,24 @@ flowchart LR
 
 ### 7. Streamlit Dashboard
 - **File**: `src/dashboard/app.py`
-- **Data source**: MongoDB (default)
-- **Visualizations**: Execution timeline, query performance, source distribution, status overview
+- **Data source**: Snowflake (`agent_runs`, `run_steps`, `api_calls`) with fallback to MongoDB
+- **Visualizations**: Agent Health, Agent Performance, Usage & Demand, Cost Efficiency (see README)
 
 ## Data Schema
 
-### MongoDB Document
+### Target model: three tables (Snowflake and dashboard)
+
+The pipeline is designed around three normalized tables for analytics. See **[Data Model & ERD](data_model_erd.md)** for the full ERD and column descriptions.
+
+- **agent_runs** — One row per run: `run_id`, `company_name`, `industry`, `status`, `started_at`, `completed_at`, `total_latency_ms`, `total_api_calls`, `error_message`, `ingested_at`.
+- **run_steps** — One row per step: `step_id`, `run_id` (FK), `step_name`, `status`, `latency_ms`, `error_message`, `ingested_at`.
+- **api_calls** — One row per API call: `call_id`, `run_id` (FK), `query_used`, `results_returned`, `latency_ms`, `called_at`, `ingested_at`.
+
+DDL and Snowpipe definitions are in `scripts/snowpipe_setup.sql`.
+
+### Legacy / flat metadata (MongoDB and Firehose today)
+
+The current agent can emit a single flat document for backward compatibility:
 
 ```json
 {
@@ -90,24 +102,7 @@ flowchart LR
 }
 ```
 
-### Snowflake Table
-
-```sql
-CREATE TABLE agent_metadata (
-    event_id VARCHAR(36) PRIMARY KEY,
-    timestamp_utc TIMESTAMP_NTZ,
-    query VARCHAR(500),
-    query_length INTEGER,
-    status VARCHAR(20),
-    latency_ms FLOAT,
-    response_size_chars INTEGER,
-    num_sources INTEGER,
-    session_id VARCHAR(36),
-    agent_version VARCHAR(50),
-    error_message VARCHAR(1000),
-    ingested_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
-);
-```
+The dashboard maps this to run-level fields (e.g. `query` → `company_name`, `num_sources` → `total_api_calls`) when Snowflake is not used.
 
 ## Error Handling
 
