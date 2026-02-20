@@ -6,11 +6,11 @@ agent:
 
 mongodb:
   database: "agent_metadata_db"
-  collection: "agent_metadata"
 
 firehose:
   buffer_size_mb: 5
   buffer_interval_seconds: 60
 
 snowflake:
-  table_name: "agent_metadata"
+  database: "AGENT_METADATA_DB"
+  schema: "PUBLIC"

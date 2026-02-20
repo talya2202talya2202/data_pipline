@@ -48,7 +48,7 @@ flowchart LR
 
 ### 3. MongoDB
 - **File**: `src/database/mongodb_client.py`
-- **Collection**: `agent_metadata`
+- **Collections**: `agent_metadata` (single-doc) or `agent_runs`, `run_steps`, `api_calls` (3-table)
 - **Role**: Primary storage for metadata; source for dashboard and Firehose streaming
 
 ### 4. Firehose Client
@@ -62,8 +62,7 @@ flowchart LR
 - **Modes**: One-shot (recent N), or stream single record from run_agent
 
 ### 6. Snowpipe
-- **Files**: `src/snowflake/snowpipe_setup.py`, `setup/setup_snowpipe.py`
-- **Role**: Auto-ingests JSON from S3 into Snowflake `agent_metadata` table
+- **Role**: Auto-ingests JSON from S3 into Snowflake (e.g. `agent_runs`, `run_steps`, `api_calls` or legacy `agent_metadata`)
 - **Trigger**: S3 event notification
 
 ### 7. Streamlit Dashboard
