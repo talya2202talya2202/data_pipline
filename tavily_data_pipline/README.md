@@ -88,18 +88,11 @@ Open http://localhost:8501 to view visualizations.
 
 ### AWS Firehose (optional)
 
-1. Configure AWS credentials (`aws configure` or env vars)
-2. Run: `python3 setup/setup_firehose.py`
-3. Add to `.env`: `FIREHOSE_STREAM_NAME`, `S3_BUCKET_NAME`, `AWS_REGION`
+Configure AWS credentials and create a Kinesis Firehose delivery stream (S3 destination) in the AWS console. Add to `.env`: `FIREHOSE_STREAM_NAME`, `S3_BUCKET_NAME`, `AWS_REGION`.
 
-### Snowflake Snowpipe (optional)
+### Snowflake (optional)
 
-1. Create Snowflake account and storage integration for S3 in Snowflake UI
-2. Run: `python3 setup/setup_snowpipe.py`
-3. Add to `.env`: `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`, etc.
-4. Configure S3 event notification to trigger Snowpipe (use `SHOW PIPES` for ARN)
-
-One-time setup scripts (Firehose, Snowpipe, CloudWatch dashboard/alarms) live in the **`setup/`** folder. See `setup/README.md`.
+Create a Snowflake account and set up database, tables (`agent_runs`, `run_steps`, `api_calls`), stage, and Snowpipe to ingest from your S3 prefix. Add Snowflake credentials to `.env` (see Environment Variables).
 
 ## Environment Variables
 
@@ -139,7 +132,6 @@ tavily_data_pipline/
 │   └── dashboard/       # Streamlit app
 ├── scripts/
 │   └── run_agent.py     # Main agent script
-├── setup/               # One-time infra setup (Firehose, Snowpipe, CloudWatch)
 ├── config/              # Runtime config (config.yaml)
 └── docs/
 ```

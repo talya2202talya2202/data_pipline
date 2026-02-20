@@ -121,16 +121,16 @@ def run_research(
     else:
         print("[Step 6] Backfill Firehose skipped (use --backfill-firehose to run)")
 
-    # --- Step 7: Optional - verify Snowflake (S3 -> Snowpipe -> Snowflake) ---
+    # --- Step 7: Optional - verify Snowflake (3-table model: agent_runs, run_steps, api_calls) ---
     if verify_snowflake:
-        print("[Step 7] Verify Snowflake (query recent rows)")
+        print("[Step 7] Verify Snowflake (query recent agent_runs)")
         try:
             from src.snowflake.snowflake_client import SnowflakeClient
             client = SnowflakeClient()
-            rows = client.get_recent_metadata(limit=5)
+            rows = client.get_agent_runs(limit=5)
             client.close()
             result["snowflake_count"] = len(rows)
-            print(f"  -> Recent rows in Snowflake: {len(rows)}")
+            print(f"  -> Recent agent_runs in Snowflake: {len(rows)}")
         except Exception as e:
             result["snowflake_error"] = str(e)
             print(f"  -> Failed (Snowflake not configured?): {e}")

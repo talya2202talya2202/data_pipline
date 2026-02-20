@@ -1,19 +1,14 @@
 """
-Streamlit dashboard for Tavily agent metadata.
+Streamlit dashboard for Tavily agent pipeline.
 
-Clean dashboard with 4 visualizations:
-1. Execution timeline – runs over time (hourly)
-2. Query performance – average latency by query (top N)
-3. Source usage – distribution of num_sources
-4. Status overview – success vs failure and success rate trend
-
-Data source: MongoDB (agent_metadata). Set MONGODB_URI in .env.
+Data source: Snowflake (agent_runs, run_steps, api_calls). Fallback: MongoDB.
+Four sections: Agent Health, Agent Performance, Usage & Demand, Cost Efficiency.
 """
 
 import sys
 from pathlib import Path
 from datetime import datetime, date, timedelta, timezone
-from typing import Optional
+from typing import Optional, Tuple
 
 project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root))
@@ -28,44 +23,91 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 
-# Page config
 st.set_page_config(
-    page_title="Agent Metadata Dashboard",
+    page_title="Agent Pipeline Dashboard",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# Custom styling for a clean look
+# Theme: deep teal/blue with coral accents
 st.markdown("""
 <style>
-    .metric-card {
-        background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%);
-        padding: 1rem 1.25rem;
-        border-radius: 0.5rem;
-        color: white;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        margin-bottom: 0.5rem;
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
     }
-    .metric-card h3 { margin: 0; font-size: 0.75rem; opacity: 0.9; text-transform: uppercase; letter-spacing: 0.05em; }
-    .metric-card .value { font-size: 1.5rem; font-weight: 700; margin-top: 0.25rem; }
-    .stSubheader { padding-top: 0.5rem; }
-    div[data-testid="stMetricValue"] { font-size: 1.25rem; }
+    [data-testid="stSidebar"] .stRadio label, [data-testid="stSidebar"] label, [data-testid="stSidebar"] p {
+        color: #e8f4f8 !important;
+    }
+    [data-testid="stSidebar"] .stSlider label { color: #e8f4f8 !important; }
+    h1 { color: #0f2027 !important; font-weight: 700 !important; }
+    .stCaption { color: #2c5364 !important; }
+    [data-testid="stMetricValue"] {
+        font-size: 1.4rem !important;
+        font-weight: 700 !important;
+        color: #0f2027 !important;
+    }
+    [data-testid="stMetricLabel"] { color: #2c5364 !important; }
+    h2, h3 { color: #203a43 !important; border-bottom: 2px solid #2c5364; padding-bottom: 0.25rem !important; }
+    .streamlit-expanderHeader { background: #f0f7fa; border-radius: 0.5rem; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("Agent Metadata Dashboard")
-st.caption("Tavily company research agent — execution metrics and performance")
+CHART_COLORS = ["#2c5364", "#3a7ca5", "#e07a5f", "#f4a261", "#81b29a", "#3d5a80"]
+alt.themes.enable("none")
+def altair_theme():
+    return {"config": {"view": {"continuousWidth": 400, "continuousHeight": 300}, "range": {"category": CHART_COLORS}}}
+alt.themes.register("custom", altair_theme)
+alt.themes.enable("custom")
+
+st.title("Agent Pipeline Dashboard")
+st.caption("Tavily company research — runs, API usage, and step reliability")
 
 
-def load_data(
-    session_id: Optional[str] = None,
-    agent_version: Optional[str] = None,
+def load_snowflake(
+    date_from: Optional[date],
+    date_to: Optional[date],
+    limit: int,
+) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[pd.DataFrame], str]:
+    """Load agent_runs, run_steps, api_calls from Snowflake. Returns (df_runs, df_steps, df_calls, error_msg)."""
+    try:
+        from src.snowflake.snowflake_client import SnowflakeClient
+        client = SnowflakeClient()
+        date_from_str = date_from.isoformat() if date_from else None
+        date_to_str = date_to.isoformat() if date_to else None
+        runs = client.get_agent_runs(limit=limit, date_from=date_from_str, date_to=date_to_str)
+        client.close()
+        if not runs:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), ""
+        run_ids = [r["RUN_ID"] for r in runs]
+        client2 = SnowflakeClient()
+        steps = client2.get_run_steps(limit=5000, run_ids=run_ids)
+        calls = client2.get_api_calls(limit=5000, run_ids=run_ids)
+        client2.close()
+        df_runs = pd.DataFrame(runs)
+        df_steps = pd.DataFrame(steps) if steps else pd.DataFrame()
+        df_calls = pd.DataFrame(calls) if calls else pd.DataFrame()
+        for df in (df_runs, df_steps, df_calls):
+            if df.empty:
+                continue
+            df.columns = [c.lower() for c in df.columns]
+        if "started_at" in df_runs.columns:
+            df_runs["started_at"] = pd.to_datetime(df_runs["started_at"], utc=True)
+        if "completed_at" in df_runs.columns:
+            df_runs["completed_at"] = pd.to_datetime(df_runs["completed_at"], utc=True)
+        if "called_at" in df_calls.columns:
+            df_calls["called_at"] = pd.to_datetime(df_calls["called_at"], utc=True)
+        return df_runs, df_steps, df_calls, ""
+    except Exception as e:
+        return None, None, None, str(e)
+
+
+def load_data_mongo(
     limit: int = 500,
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
 ) -> pd.DataFrame:
-    """Load metadata from MongoDB with optional filters (date range or all time)."""
+    """Fallback: load from MongoDB (single collection)."""
     try:
         from src.database.mongodb_client import MongoDBClient
         client = MongoDBClient()
@@ -85,13 +127,9 @@ def load_data(
         df = pd.DataFrame(docs)
         if "timestamp_utc" in df.columns:
             df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
-        if session_id:
-            df = df[df["session_id"] == session_id]
-        if agent_version:
-            df = df[df["agent_version"] == agent_version]
         return df
     except Exception as e:
-        st.error(f"Failed to load data: {e}")
+        st.error(f"MongoDB: {e}")
         return pd.DataFrame()
 
 
@@ -106,163 +144,195 @@ time_mode = st.sidebar.radio(
 date_from_filter: Optional[date] = None
 date_to_filter: Optional[date] = None
 if time_mode == "range":
-    col_from, col_to = st.sidebar.columns(2)
-    with col_from:
-        date_from_filter = st.date_input("From", value=date.today() - timedelta(days=7), key="date_from")
-    with col_to:
-        date_to_filter = st.date_input("To", value=date.today(), key="date_to")
+    date_from_filter = st.sidebar.date_input("From", value=date.today() - timedelta(days=7), key="date_from")
+    date_to_filter = st.sidebar.date_input("To", value=date.today(), key="date_to")
     if date_from_filter and date_to_filter and date_from_filter > date_to_filter:
         st.sidebar.warning("From date must be before To date.")
-limit = st.sidebar.slider("Max records", 5, 1000, 5, help="Load 5 to see all rows in the table below; increase to load more.")
+limit = st.sidebar.slider("Max runs", 5, 1000, 100, help="Max agent runs to load")
 
-df = load_data(
-    limit=limit,
-    date_from=date_from_filter if time_mode == "range" else None,
-    date_to=date_to_filter if time_mode == "range" else None,
+# Load data: try Snowflake first, then MongoDB
+df_runs: Optional[pd.DataFrame] = None
+df_steps: Optional[pd.DataFrame] = None
+df_calls: Optional[pd.DataFrame] = None
+use_snowflake = False
+snowflake_error = ""
+
+df_runs, df_steps, df_calls, snowflake_error = load_snowflake(
+    date_from_filter if time_mode == "range" else None,
+    date_to_filter if time_mode == "range" else None,
+    limit,
 )
 
-if df.empty:
+if df_runs is not None and not df_runs.empty:
+    use_snowflake = True
+    if snowflake_error:
+        st.sidebar.caption(f"Snowflake: loaded (warning: {snowflake_error})")
+else:
+    if snowflake_error:
+        st.sidebar.info(f"Snowflake not used: {snowflake_error[:80]}…")
+    df_mongo = load_data_mongo(
+        limit=limit,
+        date_from=date_from_filter if time_mode == "range" else None,
+        date_to=date_to_filter if time_mode == "range" else None,
+    )
+    if not df_mongo.empty:
+        df_runs = df_mongo
+        df_runs = df_runs.rename(columns={
+            "query": "company_name",
+            "timestamp_utc": "started_at",
+            "latency_ms": "total_latency_ms",
+            "num_sources": "total_api_calls",
+        })
+        if "company_name" not in df_runs.columns and "query" in df_mongo.columns:
+            df_runs["company_name"] = df_mongo["query"]
+        df_steps = pd.DataFrame()
+        df_calls = pd.DataFrame()
+    else:
+        st.warning("No data found. Run the agent and ensure MongoDB or Snowflake is configured.")
+        st.stop()
+
+if df_runs is None or df_runs.empty:
     st.warning("No data found. Run the agent to generate metadata.")
     st.stop()
 
-session_ids = [""] + sorted(df["session_id"].dropna().unique().tolist())
-agent_versions = [""] + sorted(df["agent_version"].dropna().unique().tolist())
-session_filter = st.sidebar.selectbox(
-    "Session", session_ids, format_func=lambda x: "All" if x == "" else (x[:12] + "…" if len(x) > 12 else x)
-)
-version_filter = st.sidebar.selectbox(
-    "Agent version", agent_versions, format_func=lambda x: "All" if x == "" else x
-)
-if session_filter:
-    df = df[df["session_id"] == session_filter]
-if version_filter:
-    df = df[df["agent_version"] == version_filter]
-
-st.sidebar.metric("Rows loaded", len(df))
+st.sidebar.metric("Runs loaded", len(df_runs))
 if st.sidebar.button("Refresh"):
     st.rerun()
 
-# KPI row
-total = len(df)
-success = (df["status"] == "success").sum() if "status" in df.columns else 0
-success_rate = (100 * success / total) if total else 0
-avg_latency = df["latency_ms"].mean() if "latency_ms" in df.columns else 0
-avg_sources = df["num_sources"].mean() if "num_sources" in df.columns else 0
-
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total runs", total)
-col2.metric("Success rate", f"{success_rate:.1f}%")
-col3.metric("Avg latency", f"{avg_latency:.0f} ms")
-col4.metric("Avg sources", f"{avg_sources:.1f}")
-
-st.divider()
-
-# 1. Execution timeline (runs per hour)
-st.subheader("1. Execution timeline")
-if "timestamp_utc" in df.columns and not df.empty:
-    timeline = (
-        df.assign(hour=df["timestamp_utc"].dt.floor("h"))
-        .groupby("hour", as_index=False)
-        .size()
-    )
-    chart_timeline = (
-        alt.Chart(timeline)
-        .mark_area(line=True, point=True, opacity=0.6)
-        .encode(
-            x=alt.X("hour:T", title="Time (UTC)"),
-            y=alt.Y("size:Q", title="Runs"),
-        )
-        .properties(height=280)
-    )
-    st.altair_chart(chart_timeline, use_container_width=True)
+# ---- Agent Health ----
+st.header("Agent Health")
+c1, c2, c3, c4 = st.columns(4)
+total_runs = len(df_runs)
+success_col = "status"
+if success_col in df_runs.columns:
+    success_count = (df_runs[success_col] == "success").sum()
+    success_rate = 100 * success_count / total_runs if total_runs else 0
 else:
-    st.info("No timestamp data.")
+    success_count = total_runs
+    success_rate = 100.0
+c1.metric("Total runs", total_runs)
+c2.metric("Success rate", f"{success_rate:.1f}%")
+avg_lat = df_runs["total_latency_ms"].mean() if "total_latency_ms" in df_runs.columns else 0
+c3.metric("Avg latency (ms)", f"{avg_lat:.0f}")
+total_apis = df_runs["total_api_calls"].sum() if "total_api_calls" in df_runs.columns else 0
+c4.metric("Total API calls", int(total_apis))
 
-# 2. Query performance (avg latency by query, top 12)
-st.subheader("2. Query performance (avg latency by query)")
-if "query" in df.columns and "latency_ms" in df.columns and not df.empty:
-    perf = (
-        df.groupby("query", as_index=False)["latency_ms"]
-        .agg(["mean", "count"])
-        .rename(columns={"mean": "avg_latency_ms", "count": "runs"})
-        .sort_values("avg_latency_ms", ascending=False)
-        .head(12)
+if "company_name" in df_runs.columns:
+    st.subheader("Runs by company")
+    count_col = "run_id" if "run_id" in df_runs.columns else "company_name"
+    by_company = df_runs.groupby("company_name", as_index=False).agg(
+        runs=(count_col, "count"),
     )
-    perf["query_short"] = perf["query"].apply(lambda x: (x[:50] + "…") if len(str(x)) > 50 else x)
-    chart_perf = (
-        alt.Chart(perf)
-        .mark_bar()
-        .encode(
-            x=alt.X("avg_latency_ms:Q", title="Avg latency (ms)"),
-            y=alt.Y("query_short:N", sort="-x", title="Query"),
-            tooltip=["query:N", "avg_latency_ms:Q", "runs:Q"],
+    if "status" in df_runs.columns:
+        success_by = df_runs.groupby("company_name", as_index=False).agg(
+            success_rate=("status", lambda s: 100 * (s == "success").sum() / len(s) if len(s) else 0),
         )
-        .properties(height=320)
-    )
+        by_company = by_company.merge(success_by, on="company_name")
+    chart_company = alt.Chart(by_company.head(15)).mark_bar().encode(
+        x=alt.X("runs:Q", title="Runs"),
+        y=alt.Y("company_name:N", sort="-x", title="Company"),
+        color=alt.value(CHART_COLORS[0]),
+        tooltip=[c for c in by_company.columns],
+    ).properties(height=300)
+    st.altair_chart(chart_company, use_container_width=True)
+
+if "error_message" in df_runs.columns and df_runs["error_message"].notna().any():
+    with st.expander("Recent errors"):
+        cols = [c for c in ["company_name", "run_id", "error_message", "started_at"] if c in df_runs.columns]
+        errs = df_runs[df_runs["error_message"].notna()][cols].head(10)
+        st.dataframe(errs, use_container_width=True, hide_index=True)
+
+# ---- Agent Performance ----
+st.header("Agent Performance")
+if "total_latency_ms" in df_runs.columns and "company_name" in df_runs.columns:
+    st.subheader("Latency by company (avg)")
+    perf = df_runs.groupby("company_name", as_index=False)["total_latency_ms"].mean().sort_values("total_latency_ms", ascending=False).head(12)
+    chart_perf = alt.Chart(perf).mark_bar().encode(
+        x=alt.X("total_latency_ms:Q", title="Avg latency (ms)"),
+        y=alt.Y("company_name:N", sort="-x", title="Company"),
+        color=alt.value(CHART_COLORS[1]),
+        tooltip=["company_name", "total_latency_ms"],
+    ).properties(height=300)
     st.altair_chart(chart_perf, use_container_width=True)
-else:
-    st.info("No query/latency data.")
 
-# 3. Source count distribution
-st.subheader("3. Source count distribution")
-if "num_sources" in df.columns and not df.empty:
-    src_counts = df["num_sources"].value_counts().sort_index().reset_index()
-    src_counts.columns = ["num_sources", "count"]
-    chart_sources = (
-        alt.Chart(src_counts)
-        .mark_bar()
-        .encode(
-            x=alt.X("num_sources:O", title="Number of sources"),
-            y=alt.Y("count:Q", title="Runs"),
-            tooltip=["num_sources:Q", "count:Q"],
-        )
-        .properties(height=260)
+if "started_at" in df_runs.columns:
+    st.subheader("Runs over time")
+    df_runs_copy = df_runs.copy()
+    df_runs_copy["hour"] = pd.to_datetime(df_runs_copy["started_at"]).dt.floor("h")
+    timeline = df_runs_copy.groupby("hour", as_index=False).size()
+    chart_timeline = alt.Chart(timeline).mark_area(line=True, point=True, opacity=0.6).encode(
+        x=alt.X("hour:T", title="Time (UTC)"),
+        y=alt.Y("size:Q", title="Runs"),
+    ).properties(height=260)
+    st.altair_chart(chart_timeline, use_container_width=True)
+
+if use_snowflake and df_steps is not None and not df_steps.empty and "step_name" in df_steps.columns and "latency_ms" in df_steps.columns:
+    st.subheader("Step performance (latency by step)")
+    step_perf = df_steps.groupby("step_name", as_index=False).agg(
+        avg_latency_ms=("latency_ms", "mean"),
+        runs=("latency_ms", "count"),
     )
-    st.altair_chart(chart_sources, use_container_width=True)
-else:
-    st.info("No num_sources data.")
+    chart_steps = alt.Chart(step_perf).mark_bar().encode(
+        x=alt.X("avg_latency_ms:Q", title="Avg latency (ms)"),
+        y=alt.Y("step_name:N", sort="-x", title="Step"),
+        color=alt.value(CHART_COLORS[2]),
+        tooltip=["step_name", "avg_latency_ms", "runs"],
+    ).properties(height=260)
+    st.altair_chart(chart_steps, use_container_width=True)
 
-# 4. Status overview (success vs failure + optional trend)
-st.subheader("4. Status overview")
-if "status" in df.columns and not df.empty:
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        status_counts = df["status"].value_counts().reset_index()
-        status_counts.columns = ["status", "count"]
-        chart_status = (
-            alt.Chart(status_counts)
-            .mark_arc(innerRadius=50)
-            .encode(
-                theta=alt.Theta("count:Q"),
-                color=alt.Color("status:N", scale=alt.Scale(range=["#22c55e", "#ef4444"])),
-                tooltip=["status:N", "count:Q"],
-            )
-            .properties(height=260, title="Success vs failure")
-        )
-        st.altair_chart(chart_status, use_container_width=True)
-    with c2:
-        if "timestamp_utc" in df.columns and len(df) >= 2:
-            daily = (
-                df.assign(date=df["timestamp_utc"].dt.date)
-                .groupby("date")["status"]
-                .apply(lambda s: 100 * (s == "success").sum() / len(s))
-                .reset_index()
-            )
-            daily.columns = ["date", "success_rate_pct"]
-            chart_trend = (
-                alt.Chart(daily)
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X("date:T", title="Date"),
-                    y=alt.Y("success_rate_pct:Q", title="Success rate (%)", scale=alt.Scale(domain=[0, 100])),
-                )
-                .properties(height=260, title="Daily success rate")
-            )
-            st.altair_chart(chart_trend, use_container_width=True)
-        else:
-            st.dataframe(status_counts, use_container_width=True, hide_index=True)
-else:
-    st.info("No status data.")
+# ---- Usage & Demand ----
+st.header("Usage & Demand")
+if "total_api_calls" in df_runs.columns and "company_name" in df_runs.columns:
+    usage = df_runs.groupby("company_name", as_index=False)["total_api_calls"].sum().sort_values("total_api_calls", ascending=False).head(12)
+    chart_usage = alt.Chart(usage).mark_bar().encode(
+        x=alt.X("total_api_calls:Q", title="Total API calls"),
+        y=alt.Y("company_name:N", sort="-x", title="Company"),
+        color=alt.value(CHART_COLORS[3]),
+        tooltip=["company_name", "total_api_calls"],
+    ).properties(height=280)
+    st.altair_chart(chart_usage, use_container_width=True)
 
-with st.expander("View raw data"):
-    st.dataframe(df, use_container_width=True, hide_index=True)
+if use_snowflake and df_calls is not None and not df_calls.empty and "query_used" in df_calls.columns:
+    st.subheader("Top queries (API calls)")
+    top_queries = df_calls["query_used"].value_counts().head(15).reset_index()
+    top_queries.columns = ["query", "calls"]
+    top_queries["query_short"] = top_queries["query"].apply(lambda x: (str(x)[:60] + "…") if len(str(x)) > 60 else str(x))
+    chart_q = alt.Chart(top_queries).mark_bar().encode(
+        x=alt.X("calls:Q", title="API calls"),
+        y=alt.Y("query_short:N", sort="-x", title="Query"),
+        color=alt.value(CHART_COLORS[4]),
+        tooltip=["query:N", "calls:Q"],
+    ).properties(height=320)
+    st.altair_chart(chart_q, use_container_width=True)
+
+# ---- Cost Efficiency ----
+st.header("Cost Efficiency")
+col1, col2 = st.columns(2)
+with col1:
+    if "total_api_calls" in df_runs.columns:
+        total_calls = int(df_runs["total_api_calls"].sum())
+        st.metric("Total API calls (all runs)", total_calls)
+with col2:
+    if "total_latency_ms" in df_runs.columns:
+        total_time_s = df_runs["total_latency_ms"].sum() / 1000
+        st.metric("Total compute time (s)", f"{total_time_s:.1f}")
+
+if "industry" in df_runs.columns and df_runs["industry"].notna().any():
+    st.subheader("Runs by industry")
+    by_ind = df_runs[df_runs["industry"].notna()].groupby("industry", as_index=False).size()
+    by_ind.columns = ["industry", "runs"]
+    chart_ind = alt.Chart(by_ind).mark_arc(innerRadius=40).encode(
+        theta=alt.Theta("runs:Q"),
+        color=alt.Color("industry:N", scale=alt.Scale(range=CHART_COLORS)),
+        tooltip=["industry", "runs"],
+    ).properties(height=280, title="Runs by industry")
+    st.altair_chart(chart_ind, use_container_width=True)
+
+with st.expander("View raw runs data"):
+    st.dataframe(df_runs, use_container_width=True, hide_index=True)
+if use_snowflake and df_steps is not None and not df_steps.empty:
+    with st.expander("View run steps"):
+        st.dataframe(df_steps, use_container_width=True, hide_index=True)
+if use_snowflake and df_calls is not None and not df_calls.empty:
+    with st.expander("View API calls"):
+        st.dataframe(df_calls, use_container_width=True, hide_index=True)

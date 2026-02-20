@@ -13,10 +13,7 @@ from snowflake.connector import DictCursor
 
 class SnowflakeClient:
     """
-    Snowflake client for agent metadata operations.
-    
-    Provides methods to execute queries and fetch metadata
-    from the agent_metadata table.
+    Snowflake client for agent metadata (3-table model: agent_runs, run_steps, api_calls).
     """
     
     def __init__(
@@ -100,49 +97,74 @@ class SnowflakeClient:
             cursor.execute(ddl)
         finally:
             cursor.close()
-    
-    def get_recent_metadata(self, limit: int = 100) -> List[Dict[str, Any]]:
+
+    def get_agent_runs(
+        self,
+        limit: int = 500,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """
-        Get recent metadata entries from agent_metadata table.
-        
-        Args:
-            limit: Maximum number of rows to return
-            
-        Returns:
-            List of metadata documents
+        Get agent_runs with optional date filter on started_at.
+        date_from / date_to: ISO date string or YYYY-MM-DD.
         """
         query = """
-            SELECT event_id, timestamp_utc, query, query_length, status,
-                   latency_ms, response_size_chars, num_sources, session_id,
-                   agent_version, error_message, ingested_at
-            FROM agent_metadata
-            ORDER BY timestamp_utc DESC
+            SELECT run_id, company_name, industry, status, started_at, completed_at,
+                   total_latency_ms, total_api_calls, error_message, ingested_at
+            FROM agent_runs
+            WHERE 1=1
+        """
+        params: List[Any] = []
+        if date_from:
+            query += " AND CAST(started_at AS DATE) >= %s"
+            params.append(date_from)
+        if date_to:
+            query += " AND CAST(started_at AS DATE) <= %s"
+            params.append(date_to)
+        query += " ORDER BY started_at DESC LIMIT %s"
+        params.append(limit)
+        return self.execute(query, tuple(params))
+
+    def get_run_steps(self, limit: int = 5000, run_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Get run_steps, optionally filtered by run_id list."""
+        if run_ids:
+            placeholders = ",".join(["%s"] * len(run_ids))
+            query = f"""
+                SELECT step_id, run_id, step_name, status, latency_ms, error_message, ingested_at
+                FROM run_steps
+                WHERE run_id IN ({placeholders})
+                ORDER BY ingested_at DESC
+                LIMIT %s
+            """
+            return self.execute(query, (*run_ids, limit))
+        query = """
+            SELECT step_id, run_id, step_name, status, latency_ms, error_message, ingested_at
+            FROM run_steps
+            ORDER BY ingested_at DESC
             LIMIT %s
         """
         return self.execute(query, (limit,))
-    
-    def get_metadata_by_session(self, session_id: str, limit: int = 1000) -> List[Dict[str, Any]]:
-        """
-        Get metadata entries for a specific session.
-        
-        Args:
-            session_id: Session identifier
-            limit: Maximum number of rows
-            
-        Returns:
-            List of metadata documents
-        """
+
+    def get_api_calls(self, limit: int = 5000, run_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Get api_calls, optionally filtered by run_id list."""
+        if run_ids:
+            placeholders = ",".join(["%s"] * len(run_ids))
+            query = f"""
+                SELECT call_id, run_id, query_used, results_returned, latency_ms, called_at, ingested_at
+                FROM api_calls
+                WHERE run_id IN ({placeholders})
+                ORDER BY called_at DESC
+                LIMIT %s
+            """
+            return self.execute(query, (*run_ids, limit))
         query = """
-            SELECT event_id, timestamp_utc, query, query_length, status,
-                   latency_ms, response_size_chars, num_sources, session_id,
-                   agent_version, error_message, ingested_at
-            FROM agent_metadata
-            WHERE session_id = %s
-            ORDER BY timestamp_utc ASC
+            SELECT call_id, run_id, query_used, results_returned, latency_ms, called_at, ingested_at
+            FROM api_calls
+            ORDER BY called_at DESC
             LIMIT %s
         """
-        return self.execute(query, (session_id, limit))
-    
+        return self.execute(query, (limit,))
+
     def close(self):
         """Close Snowflake connection."""
         if self.conn:
