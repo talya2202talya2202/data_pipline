@@ -2,6 +2,8 @@
 
 ## Data flow
 
+Metadata in MongoDB (`agent_metadata`) is streamed to Snowflake by the Metadata Streamer: each document is transformed into three records (agent_run, run_step, api_call), which land in **agent_runs**, **run_steps**, and **api_calls** via Firehose → S3 → Snowpipe. This “transform raw to three tables” keeps one source of truth and supports run-level and drill-down analytics without ad-hoc parsing.
+
 ```mermaid
 flowchart LR
     subgraph agent [Agent Layer]

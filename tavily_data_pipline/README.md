@@ -59,10 +59,6 @@ More detail: [docs/architecture.md](docs/architecture.md).
 
 The pipeline is built around **three normalized tables** so we can answer the business questions above and support drill-down.
 
-**ERD:**
-
-![Tavily Agent Pipeline — ERD](docs/erd_tavily_agent_pipeline.png)
-
 Same model in Mermaid:
 
 ```mermaid
@@ -102,6 +98,8 @@ erDiagram
 | **agent_runs** | One row per run: company, industry, status, timings, total API calls. Used for run-level KPIs and dashboards. |
 | **run_steps** | One row per step in a run (e.g. search_overview, search_competitors, summarize). Used to see which step failed or is slow. |
 | **api_calls** | One row per external API call (e.g. Tavily). Used for cost and duplicate-query analysis. |
+
+**From MongoDB to Snowflake** — Metadata is streamed from the MongoDB `agent_metadata` collection into Snowflake via the Metadata Streamer → Firehose → S3 → Snowpipe. Each document is transformed into three records (run, step, api_call): run-level data lands in **agent_runs**, and the same pass populates **run_steps** and **api_calls** (the pipeline’s “transform raw to three tables” step). This keeps a single source of truth, avoids ad-hoc parsing in the warehouse, and lets the dashboard query run-level KPIs and drill into steps and API calls.
 
 **Why this shape** — These tables directly support the four areas we care about: **Agent Health** (success/failure, errors), **Agent Performance** (latency, bottlenecks), **Usage & Demand** (runs over time, top companies), and **Cost Efficiency** (API calls per run, expensive or duplicate queries). The dashboard is built on these. In the future we may extend with more dimensions—for example **per-user** usage and **cost attribution** (e.g. by team or project)—using the same run/step/call backbone.
 

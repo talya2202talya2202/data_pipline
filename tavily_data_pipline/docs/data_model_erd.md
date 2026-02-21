@@ -4,8 +4,6 @@ Three normalized tables for analytics and the dashboard. **agent_runs** is the p
 
 ## ERD
 
-![Tavily Agent Pipeline — ERD](erd_tavily_agent_pipeline.png)
-
 ```mermaid
 erDiagram
     agent_runs ||--o{ run_steps : "has steps"

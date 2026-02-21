@@ -1,13 +1,13 @@
 """
 Streamlit dashboard for Tavily agent pipeline.
 
-Data source: Snowflake (agent_runs, run_steps, api_calls). Fallback: MongoDB.
-Four sections, 2–3 key visuals each: Agent Health, Agent Performance, Usage & Demand, Cost Efficiency.
+Data source: Snowflake only (agent_runs, run_steps, api_calls).
+Four sections: Agent Health, Agent Performance, Usage & Demand, Cost Efficiency.
 """
 
 import sys
 from pathlib import Path
-from datetime import datetime, date, timedelta, timezone
+from datetime import date, timedelta
 from typing import Optional, Tuple
 
 project_root = Path(__file__).resolve().parent.parent.parent
@@ -19,6 +19,7 @@ try:
 except ImportError:
     pass
 
+import os
 import streamlit as st
 import pandas as pd
 import altair as alt
@@ -105,37 +106,6 @@ def load_snowflake(
         return None, None, None, str(e)
 
 
-def load_data_mongo(
-    limit: int = 500,
-    date_from: Optional[date] = None,
-    date_to: Optional[date] = None,
-) -> pd.DataFrame:
-    """Fallback: load from MongoDB (single collection)."""
-    try:
-        from src.database.mongodb_client import MongoDBClient
-        client = MongoDBClient()
-        if date_from is not None or date_to is not None:
-            start = datetime.combine(date_from or date(2000, 1, 1), datetime.min.time()).replace(tzinfo=timezone.utc)
-            end = datetime.combine(date_to or date.today(), datetime.max.time()).replace(tzinfo=timezone.utc)
-            if date_from is None:
-                start = datetime(2000, 1, 1, tzinfo=timezone.utc)
-            if date_to is None:
-                end = datetime.now(timezone.utc)
-            docs = client.get_metadata_by_date_range(start, end, limit=limit)
-        else:
-            docs = client.get_recent_metadata(limit=limit, hours=None)
-        client.close()
-        if not docs:
-            return pd.DataFrame()
-        df = pd.DataFrame(docs)
-        if "timestamp_utc" in df.columns:
-            df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
-        return df
-    except Exception as e:
-        st.error(f"MongoDB: {e}")
-        return pd.DataFrame()
-
-
 # ----- Sidebar -----
 st.sidebar.header("Filters")
 time_mode = st.sidebar.radio(
@@ -163,38 +133,19 @@ df_runs, df_steps, df_calls, snowflake_error = load_snowflake(
     limit,
 )
 
-if df_runs is not None and not df_runs.empty:
-    use_snowflake = True
-    if snowflake_error:
-        st.sidebar.caption(f"Snowflake: loaded (warning: {snowflake_error})")
-else:
-    if snowflake_error:
-        st.sidebar.info(f"Snowflake not used: {snowflake_error[:80]}…")
-    df_mongo = load_data_mongo(
-        limit=limit,
-        date_from=date_from_filter if time_mode == "range" else None,
-        date_to=date_to_filter if time_mode == "range" else None,
-    )
-    if not df_mongo.empty:
-        df_runs = df_mongo.copy()
-        df_runs = df_runs.rename(columns={
-            "query": "company_name",
-            "timestamp_utc": "started_at",
-            "latency_ms": "total_latency_ms",
-            "num_sources": "total_api_calls",
-        })
-        if "company_name" not in df_runs.columns and "query" in df_mongo.columns:
-            df_runs["company_name"] = df_mongo["query"]
-        df_steps = pd.DataFrame()
-        df_calls = pd.DataFrame()
-    else:
-        st.warning("No data found. Run the agent and ensure MongoDB or Snowflake is configured.")
-        st.stop()
-
 if df_runs is None or df_runs.empty:
-    st.warning("No data found. Run the agent to generate metadata.")
+    st.error("No data from Snowflake. Check credentials (SNOWFLAKE_* in .env) and that agent_runs has data.")
+    if snowflake_error:
+        st.code(snowflake_error, language="text")
     st.stop()
 
+use_snowflake = True
+if snowflake_error:
+    st.sidebar.caption(f"Snowflake: loaded (warning: {snowflake_error})")
+
+db = os.getenv("SNOWFLAKE_DATABASE", "?")
+schema = os.getenv("SNOWFLAKE_SCHEMA", "?")
+st.sidebar.caption(f"Source: **{db}.{schema}.agent_runs** · {len(df_runs)} rows")
 st.sidebar.metric("Runs loaded", len(df_runs))
 if st.sidebar.button("Refresh"):
     st.rerun()

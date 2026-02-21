@@ -106,7 +106,7 @@ class SnowflakeClient:
     ) -> List[Dict[str, Any]]:
         """
         Get agent_runs with optional date filter on started_at.
-        date_from / date_to: ISO date string or YYYY-MM-DD.
+        Uses connection's database/schema (from SNOWFLAKE_DATABASE, SNOWFLAKE_SCHEMA).
         """
         query = """
             SELECT run_id, company_name, industry, status, started_at, completed_at,
