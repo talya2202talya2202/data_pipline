@@ -200,20 +200,19 @@ if "error_message" in df_runs.columns and df_runs["error_message"].notna().any()
         cols = [c for c in ["company_name", "run_id", "error_message", "started_at"] if c in df_runs.columns]
         st.dataframe(df_runs[df_runs["error_message"].notna()][cols].head(10), use_container_width=True, hide_index=True)
 
-# ----- 2. Agent Performance: top 5 companies searched, industries -----
+# ----- 2. Agent Performance: run latency distribution, runs by industry -----
 st.header("⚡ Agent Performance")
-st.caption("Top companies searched (count), and runs by industry")
+st.caption("Run latency distribution, runs by industry")
 
-# Chart 1: Top 5 companies that were searched and how many times each
-if "company_name" in df_runs.columns:
-    count_col = "run_id" if "run_id" in df_runs.columns else "company_name"
-    top5 = df_runs.groupby("company_name", as_index=False).agg(runs=(count_col, "count")).sort_values("runs", ascending=False).head(5)
-    chart_top5 = alt.Chart(top5).mark_bar(color=COLORS["perf"][0]).encode(
-        x=alt.X("runs:Q", title="Number of searches"),
-        y=alt.Y("company_name:N", sort="-x", title="Company"),
-        tooltip=["company_name", "runs"],
-    ).properties(height=240, title="Top 5 companies searched (how many times each)")
-    st.altair_chart(chart_top5, use_container_width=True)
+# Chart 1: Run latency distribution (histogram) — how fast are runs, how spread out
+if "total_latency_ms" in df_runs.columns and df_runs["total_latency_ms"].notna().any():
+    runs_lat = df_runs[df_runs["total_latency_ms"].notna()]
+    chart_lat_hist = alt.Chart(runs_lat).mark_bar(color=COLORS["perf"][0]).encode(
+        x=alt.X("total_latency_ms:Q", bin=alt.Bin(maxbins=30), title="Run latency (ms)"),
+        y=alt.Y("count():Q", title="Number of runs"),
+        tooltip=[alt.Tooltip("total_latency_ms:Q", bin=True, title="Latency (ms)"), alt.Tooltip("count():Q", title="Runs")],
+    ).properties(height=240, title="Run latency distribution")
+    st.altair_chart(chart_lat_hist, use_container_width=True)
 
 # Chart 2: Pie chart with industries
 if "industry" in df_runs.columns and df_runs["industry"].notna().any():
@@ -266,28 +265,15 @@ c1, c2 = st.columns(2)
 c1.metric("Total API calls (all runs)", total_calls)
 c2.metric("Avg API calls per run", f"{avg_per_run:.1f}")
 
-# Chart 1: Most frequent queries (duplicate detection) — integer counts, regular bar chart
-if use_snowflake and df_calls is not None and not df_calls.empty and "query_used" in df_calls.columns:
-    top_q = df_calls["query_used"].value_counts().head(12).reset_index()
-    top_q.columns = ["query", "calls"]
-    top_q["calls"] = top_q["calls"].astype(int)
-    top_q["query_short"] = top_q["query"].apply(lambda x: (str(x)[:50] + "…") if len(str(x)) > 50 else str(x))
-    chart_q = alt.Chart(top_q).mark_bar(color=COLORS["cost"][0]).encode(
-        x=alt.X("calls:Q", title="API calls", scale=alt.Scale(nice=False), axis=alt.Axis(format="d", tickMinStep=1)),
-        y=alt.Y("query_short:N", sort="-x", title="Query"),
-        tooltip=[alt.Tooltip("query:N", title="Query"), alt.Tooltip("calls:Q", format="d", title="Calls")],
-    ).properties(height=280, title="Most frequent queries (duplicate detection)")
-    st.altair_chart(chart_q, use_container_width=True)
-# Fallback: API usage by company from runs
-elif "company_name" in df_runs.columns and api_col in df_runs.columns:
-    usage_co = df_runs.groupby("company_name", as_index=False)[api_col].sum().sort_values(api_col, ascending=False).head(10)
-    usage_co[api_col] = usage_co[api_col].astype(int)
-    chart_usage = alt.Chart(usage_co).mark_bar(color=COLORS["cost"][1]).encode(
-        x=alt.X("total_api_calls:Q", title="Total API calls", axis=alt.Axis(format="d", tickMinStep=1)),
-        y=alt.Y("company_name:N", sort="-x", title="Company"),
-        tooltip=["company_name", alt.Tooltip("total_api_calls:Q", format="d")],
-    ).properties(height=260, title="API calls by company")
-    st.altair_chart(chart_usage, use_container_width=True)
+# Chart: Latency of each step (from run_steps)
+if use_snowflake and df_steps is not None and not df_steps.empty and "step_name" in df_steps.columns and "latency_ms" in df_steps.columns:
+    step_latency = df_steps.groupby("step_name", as_index=False)["latency_ms"].mean().sort_values("latency_ms", ascending=False)
+    chart_step_latency = alt.Chart(step_latency).mark_bar(color=COLORS["cost"][1]).encode(
+        x=alt.X("latency_ms:Q", title="Avg latency (ms)", axis=alt.Axis(format=".0f", tickMinStep=1)),
+        y=alt.Y("step_name:N", sort="-x", title="Step"),
+        tooltip=["step_name", alt.Tooltip("latency_ms:Q", format=".1f", title="Avg latency (ms)")],
+    ).properties(height=260, title="Latency of each step")
+    st.altair_chart(chart_step_latency, use_container_width=True)
 
 # Chart 2: Average cost (latency) per company — how expensive each company was
 lat_col = "total_latency_ms"
