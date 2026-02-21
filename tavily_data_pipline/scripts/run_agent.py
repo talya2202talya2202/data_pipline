@@ -208,9 +208,13 @@ def main():
         metadata = result["metadata"]
         print("\n--- Summary ---")
         if state.get("error"):
-            print(f"Research: failed ({state['error']})")
+            print(f"Research: FAILED ({state['error']})")
         else:
-            print(f"Research: OK | {len(state['sources'])} sources | {metadata['latency_ms']:.0f}ms")
+            company = state.get("company_name") or args.query
+            industry = state.get("industry") or "n/a"
+            n_src = len(state.get("sources", []))
+            n_steps = len(state.get("steps", []))
+            print(f"Research: OK | {company} ({industry}) | {n_src} sources | {n_steps} steps | {metadata['latency_ms']:.0f}ms")
         print(f"MongoDB:  {result['mongo_id'] or result['mongo_error'] or 'skipped'}")
         print(f"Firehose: {'sent' if result['firehose_sent'] else result['firehose_error'] or 'skipped'}")
         if result.get("backfill_sent") is not None and result["backfill_sent"] > 0:

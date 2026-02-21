@@ -1,8 +1,9 @@
 """
-Metadata Streamer - polls MongoDB for metadata and streams to AWS Firehose.
+Metadata Streamer - reads metadata from MongoDB and streams to AWS Firehose.
 
-Sends records in the shapes expected by Snowflake: agent_run, run_step, api_call
-so that the pipe -> raw -> procedure can insert into agent_runs, run_steps, api_calls.
+Converts metadata documents into the record shapes expected by Snowflake:
+agent_run, run_step, api_call.  Handles both enriched metadata (with real
+steps/api_calls lists) and legacy flat metadata (synthetic single step/call).
 """
 
 import os
@@ -24,30 +25,58 @@ def _ensure_ts(ts: Any) -> str:
     return str(ts)
 
 
-def _flat_to_agent_run(doc: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Convert flat metadata to agent_run shape (record_type, run_id, company_name, ...).
-    """
-    ts = _ensure_ts(doc.get("timestamp_utc"))
+# ------------------------------------------------------------------
+# Record builders — enriched metadata (multi-step agent)
+# ------------------------------------------------------------------
+
+def _to_agent_run(doc: Dict[str, Any]) -> Dict[str, Any]:
+    started = _ensure_ts(doc.get("started_at_utc") or doc.get("timestamp_utc"))
+    completed = _ensure_ts(doc.get("completed_at_utc") or doc.get("timestamp_utc"))
+    api_calls = doc.get("api_calls", [])
     return {
         "record_type": "agent_run",
         "run_id": doc.get("event_id"),
-        "company_name": doc.get("query"),
-        "industry": None,
+        "company_name": doc.get("company_name", doc.get("query")),
+        "industry": doc.get("industry"),
         "status": doc.get("status"),
-        "started_at": ts,
-        "completed_at": ts,
+        "started_at": started,
+        "completed_at": completed,
         "total_latency_ms": doc.get("latency_ms"),
-        "total_api_calls": doc.get("num_sources", 0),
+        "total_api_calls": len(api_calls) if api_calls else doc.get("num_sources", 0),
         "error_message": doc.get("error_message"),
     }
 
 
+def _step_to_run_step(doc: Dict[str, Any], step: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "record_type": "run_step",
+        "step_id": str(uuid.uuid4()),
+        "run_id": doc.get("event_id"),
+        "step_name": step.get("step_name", "research"),
+        "status": step.get("status", doc.get("status")),
+        "latency_ms": step.get("latency_ms", doc.get("latency_ms")),
+        "error_message": step.get("error"),
+    }
+
+
+def _call_to_api_call(doc: Dict[str, Any], call: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "record_type": "api_call",
+        "call_id": str(uuid.uuid4()),
+        "run_id": doc.get("event_id"),
+        "query_used": call.get("query", doc.get("query")),
+        "results_returned": call.get("results_returned", doc.get("num_sources", 0)),
+        "latency_ms": call.get("latency_ms", doc.get("latency_ms")),
+        "called_at": _ensure_ts(call.get("called_at") or doc.get("timestamp_utc")),
+    }
+
+
+# ------------------------------------------------------------------
+# Legacy record builders — flat metadata (single-step agent)
+# ------------------------------------------------------------------
+
 def _flat_to_run_step(doc: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Convert flat metadata to one run_step record (step_id, run_id, step_name, status, ...).
-    One synthetic step per run: the main "research" step.
-    """
+    """Synthetic single step for legacy flat metadata."""
     return {
         "record_type": "run_step",
         "step_id": str(uuid.uuid4()),
@@ -60,10 +89,7 @@ def _flat_to_run_step(doc: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _flat_to_api_call(doc: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Convert flat metadata to one api_call record (call_id, run_id, query_used, ...).
-    One synthetic API call per run: the Tavily research call.
-    """
+    """Synthetic single API call for legacy flat metadata."""
     ts = _ensure_ts(doc.get("timestamp_utc"))
     return {
         "record_type": "api_call",
@@ -76,13 +102,33 @@ def _flat_to_api_call(doc: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _flat_to_three_records(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Build agent_run, run_step, and api_call records from one flat metadata doc."""
-    return [
-        _flat_to_agent_run(doc),
-        _flat_to_run_step(doc),
-        _flat_to_api_call(doc),
-    ]
+# ------------------------------------------------------------------
+# Orchestrator — picks enriched or legacy path
+# ------------------------------------------------------------------
+
+def _metadata_to_records(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build all Firehose records from a metadata document.
+
+    Handles both enriched metadata (with steps/api_calls lists from the
+    multi-step agent) and legacy flat metadata (synthetic single step/call).
+    """
+    records: List[Dict[str, Any]] = [_to_agent_run(doc)]
+
+    steps = doc.get("steps", [])
+    if steps:
+        for step in steps:
+            records.append(_step_to_run_step(doc, step))
+    else:
+        records.append(_flat_to_run_step(doc))
+
+    api_calls = doc.get("api_calls", [])
+    if api_calls:
+        for call in api_calls:
+            records.append(_call_to_api_call(doc, call))
+    else:
+        records.append(_flat_to_api_call(doc))
+
+    return records
 
 
 class MetadataStreamer:
@@ -100,14 +146,6 @@ class MetadataStreamer:
         firehose_client: Optional[FirehoseClient] = None,
         batch_size: int = 25
     ):
-        """
-        Initialize metadata streamer.
-        
-        Args:
-            mongo_client: MongoDB client. Creates one if None.
-            firehose_client: Firehose client. Creates one if None (requires env vars).
-            batch_size: Max records per Firehose batch (Firehose limit 500, use 25 for safety)
-        """
         self.mongo_client = mongo_client
         self.firehose_client = firehose_client
         self.batch_size = batch_size
@@ -132,19 +170,13 @@ class MetadataStreamer:
                 record[key] = value.isoformat()
         return record
 
-    def _to_firehose_record(self, flat_metadata: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert flat metadata to Snowflake agent_run shape and prepare for JSON."""
-        agent_run = _flat_to_agent_run(flat_metadata)
-        return self._prepare_record(agent_run)
-
-    def _to_firehose_records_three(self, flat_metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Convert flat metadata to [agent_run, run_step, api_call] and prepare for JSON."""
-        return [self._prepare_record(r) for r in _flat_to_three_records(flat_metadata)]
+    def _to_firehose_records(self, metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Convert a metadata document into prepared Firehose records."""
+        return [self._prepare_record(r) for r in _metadata_to_records(metadata)]
 
     def stream_recent(self, limit: int = 100) -> int:
         """
         Stream the N most recent metadata documents from MongoDB to Firehose.
-        Each doc is sent as three records: agent_run, run_step, api_call.
         
         Args:
             limit: Maximum number of documents to stream
@@ -159,7 +191,7 @@ class MetadataStreamer:
         if not docs:
             return 0
         
-        records = [r for d in docs for r in self._to_firehose_records_three(d)]
+        records = [r for d in docs for r in self._to_firehose_records(d)]
         return self.firehose_client.send_batch(records)
 
     def stream_since(self, since: datetime) -> int:
@@ -180,25 +212,22 @@ class MetadataStreamer:
         if not docs:
             return 0
 
-        records = [r for d in docs for r in self._to_firehose_records_three(d)]
+        records = [r for d in docs for r in self._to_firehose_records(d)]
         return self.firehose_client.send_batch(records)
 
     def stream_metadata(self, metadata: Dict[str, Any]) -> bool:
         """
-        Stream one run to Firehose as three records: agent_run, run_step, api_call.
-
-        Use this when you have metadata from run_agent (e.g. right after saving to MongoDB).
-        Snowflake pipe -> raw -> procedure will insert into agent_runs, run_steps, api_calls.
+        Stream one run to Firehose as agent_run + run_step(s) + api_call(s).
 
         Args:
-            metadata: Single metadata dict from MetadataCollector (flat: event_id, query, ...)
+            metadata: Single metadata dict from MetadataCollector
 
         Returns:
-            True if all three records sent successfully
+            True if all records sent successfully
         """
         if not self.firehose_client:
             return False
 
-        records = self._to_firehose_records_three(metadata)
+        records = self._to_firehose_records(metadata)
         sent = self.firehose_client.send_batch(records)
         return sent == len(records)

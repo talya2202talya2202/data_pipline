@@ -113,7 +113,6 @@ class MetadataCollector:
         """
         latency_ms = (end_time - start_time) * 1000
         
-        # Determine status
         if state.get("error"):
             status = "failure"
             error_message = state.get("error")
@@ -121,7 +120,6 @@ class MetadataCollector:
             status = "success"
             error_message = None
         
-        # Calculate response size
         sources = state.get("sources", [])
         response_size_chars = sum(
             len(str(source.get("title", ""))) +
@@ -132,7 +130,7 @@ class MetadataCollector:
         
         num_sources = len(sources)
         
-        return self.collect_metadata(
+        metadata = self.collect_metadata(
             query=query,
             status=status,
             latency_ms=latency_ms,
@@ -140,6 +138,19 @@ class MetadataCollector:
             num_sources=num_sources,
             error_message=error_message
         )
+
+        metadata["company_name"] = state.get("company_name", query)
+        metadata["industry"] = state.get("industry")
+        metadata["steps"] = state.get("steps", [])
+        metadata["api_calls"] = state.get("api_calls", [])
+        metadata["started_at_utc"] = datetime.fromtimestamp(
+            start_time, tz=timezone.utc
+        ).isoformat()
+        metadata["completed_at_utc"] = datetime.fromtimestamp(
+            end_time, tz=timezone.utc
+        ).isoformat()
+
+        return metadata
     
     def get_latest_metadata(self) -> Optional[Dict[str, Any]]:
         """Get the most recent metadata entry."""
